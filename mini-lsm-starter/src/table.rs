@@ -4,10 +4,11 @@ mod builder;
 mod iterator;
 
 use std::cmp::Ordering;
+use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 pub use builder::SsTableBuilder;
 use bytes::{Buf, BufMut, Bytes};
 pub use iterator::SsTableIterator;
@@ -61,20 +62,27 @@ impl BlockMeta {
 }
 
 /// A file object.
-pub struct FileObject(Bytes);
+pub struct FileObject(File, u64);
 
 impl FileObject {
     pub fn read(&self, offset: u64, len: u64) -> Result<Vec<u8>> {
-        Ok(self.0[offset as usize..(offset + len) as usize].to_vec())
+        use std::os::unix::fs::FileExt;
+        let mut data = vec![0; len as usize];
+        self.0.read_exact_at(&mut data[..], offset)?;
+        Ok(data)
     }
 
     pub fn size(&self) -> u64 {
-        self.0.len() as u64
+        self.1
     }
 
     /// Create a new file object (day 2) and write the file to the disk (day 4).
     pub fn create(path: &Path, data: Vec<u8>) -> Result<Self> {
-        Ok(FileObject(data.into()))
+        std::fs::write(path, &data)?;
+        Ok(FileObject(
+            File::options().read(true).write(false).open(path)?,
+            data.len() as u64,
+        ))
     }
 
     pub fn open(path: &Path) -> Result<Self> {
@@ -86,6 +94,8 @@ pub struct SsTable {
     file: FileObject,
     block_metas: Vec<BlockMeta>,
     block_meta_offset: usize,
+    id: usize,
+    block_cache: Option<Arc<BlockCache>>,
 }
 
 impl SsTable {
@@ -106,6 +116,8 @@ impl SsTable {
             file,
             block_metas,
             block_meta_offset,
+            id,
+            block_cache,
         })
     }
 
@@ -122,7 +134,14 @@ impl SsTable {
 
     /// Read a block from disk, with block cache. (Day 4)
     pub fn read_block_cached(&self, block_idx: usize) -> Result<Arc<Block>> {
-        unimplemented!()
+        if let Some(ref block_cache) = self.block_cache {
+            let blk = block_cache
+                .try_get_with((self.id, block_idx), || self.read_block(block_idx))
+                .map_err(|e| anyhow!("{}", e))?;
+            Ok(blk)
+        } else {
+            self.read_block(block_idx)
+        }
     }
 
     /// Find the block that may contain `key`.
